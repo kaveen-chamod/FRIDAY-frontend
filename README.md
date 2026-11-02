@@ -71,3 +71,105 @@ Threat and incident views require the backend's verified Master speaker token
 and Master Passphrase. Selecting a role in the interface is a display
 preference; it does not grant backend authority. The circuit viewport is a
 standalone visualizer and returns to the dashboard locally.
+
+
+
+===================================================
+
+## 🚀 Frontend – GitHub Repository Setup
+
+The F.R.I.D.A.Y. Frontend is maintained as a separate React + Vite project and hosted in its own GitHub repository.
+
+**GitHub Repository:**  
+https://github.com/kaveen-chamod/FRIDAY-frontend
+
+### 1. Navigate to the Frontend Directory
+
+Open PowerShell and navigate to the Frontend project directory.
+
+```powershell
+cd "D:\MERN_development\Jarvis-AI-main\Jarvis-AI-main\JarvisAI\Front End"
+```
+
+### 2. Initialize Git and Configure the Main Branch
+
+```powershell
+git init
+git branch -M main
+```
+
+### 3. Connect the GitHub Repository
+
+```powershell
+git remote add origin https://github.com/kaveen-chamod/FRIDAY-frontend.git
+```
+
+If the remote repository is already configured, update its URL using:
+
+```powershell
+git remote set-url origin https://github.com/kaveen-chamod/FRIDAY-frontend.git
+```
+
+### 4. Add Project Files
+
+```powershell
+git add .
+```
+
+### 5. Commit Changes
+
+```powershell
+git commit -m "Initial commit - F.R.I.D.A.Y. Frontend"
+```
+
+### 6. Push the Project to GitHub
+
+```powershell
+git push -u origin main
+```
+
+### 7. Install Dependencies and Run the Frontend
+
+After cloning the repository, install the required dependencies:
+
+```powershell
+npm install
+```
+
+Start the development server:
+
+```powershell
+npm run dev
+```
+
+### 8. Create a Production Build
+
+To generate an optimized production build:
+
+```powershell
+npm run build
+```
+
+---
+
+### 🔄 Future Updates
+
+Whenever you make changes to the frontend project, use the following commands to update the GitHub repository:
+
+```powershell
+git add .
+git commit -m "Update F.R.I.D.A.Y. Frontend"
+git push origin main
+```
+
+### ⚠️ Important Notes
+
+- Make sure Git is installed on your computer.
+- Ensure you are inside the correct Frontend directory before running Git commands.
+- Do not upload `.env` files, API keys, passwords, or other sensitive information.
+- Add sensitive files and dependencies such as `node_modules/` to `.gitignore`.
+
+**Frontend Repository:**  
+https://github.com/kaveen-chamod/FRIDAY-frontend
+
+=====================================================
