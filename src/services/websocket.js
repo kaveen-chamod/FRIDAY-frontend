@@ -37,11 +37,23 @@ export class FridaySockets {
     this.live = null;
     this.telemetry = null;
     this.mediaStream = null;
-    this.audioContext = null;
+    this.micAudioContext = null;
+    this.playbackContext = null;
     this.processor = null;
     this.silentOutput = null;
     this.playbackAt = 0;
     this.micEnabled = false;
+  }
+
+  ensurePlaybackContext() {
+    if (!this.playbackContext || this.playbackContext.state === "closed") {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.playbackContext = new AudioCtx({ sampleRate: 24000 });
+    }
+    if (this.playbackContext.state === "suspended") {
+      void this.playbackContext.resume();
+    }
+    return this.playbackContext;
   }
 
   connectTelemetry() {
@@ -62,6 +74,7 @@ export class FridaySockets {
   }
 
   connectLive(client = "web") {
+    this.ensurePlaybackContext();
     return new Promise((resolve, reject) => {
       const url = authenticatedUrl("/ws/live", this.auth.token);
       const parsedUrl = new URL(url);
@@ -77,6 +90,7 @@ export class FridaySockets {
         socket.close();
         reject(new Error("Live voice connection timed out."));
       }, 12000);
+
       socket.onopen = () => {
         socket.send(JSON.stringify({
           client,
@@ -87,6 +101,7 @@ export class FridaySockets {
           ...(this.auth.masterPassphrase ? { master_passphrase: this.auth.masterPassphrase } : {}),
         }));
       };
+
       socket.onmessage = (event) => {
         if (typeof event.data !== "string") {
           this.playPcm(event.data);
@@ -106,11 +121,13 @@ export class FridaySockets {
           this.callbacks.onLiveEvent?.(message);
         }
       };
+
       socket.onerror = () => {
         window.clearTimeout(timeout);
         this.callbacks.onLiveState?.("error");
         reject(new Error("Could not connect to the live voice service."));
       };
+
       socket.onclose = () => {
         window.clearTimeout(timeout);
         this.stopMicrophone();
@@ -124,32 +141,41 @@ export class FridaySockets {
     if (!this.live || this.live.readyState !== WebSocket.OPEN) {
       throw new Error("Connect to live voice before enabling the microphone.");
     }
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    } });
-    this.audioContext = new AudioContext();
-    const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-    this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-    this.silentOutput = this.audioContext.createGain();
+    this.ensurePlaybackContext();
+    this.mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+    });
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    this.micAudioContext = new AudioCtx();
+    const source = this.micAudioContext.createMediaStreamSource(this.mediaStream);
+    this.processor = this.micAudioContext.createScriptProcessor(4096, 1, 1);
+    this.silentOutput = this.micAudioContext.createGain();
     this.silentOutput.gain.value = 0;
+
     this.processor.onaudioprocess = (event) => {
       if (!this.micEnabled || this.live?.readyState !== WebSocket.OPEN) return;
       const samples = downsampleTo16k(
         event.inputBuffer.getChannelData(0),
-        this.audioContext.sampleRate,
+        this.micAudioContext.sampleRate,
       );
       const pcm = toPcm16(samples);
       if (pcm.byteLength) this.live.send(pcm.buffer);
+
       let sum = 0;
       for (let i = 0; i < samples.length; i += 8) sum += samples[i] * samples[i];
       this.callbacks.onInputLevel?.(Math.sqrt(sum / Math.max(1, Math.ceil(samples.length / 8))));
     };
+
     source.connect(this.processor);
     this.processor.connect(this.silentOutput);
-    this.silentOutput.connect(this.audioContext.destination);
+    this.silentOutput.connect(this.micAudioContext.destination);
+
     this.micEnabled = true;
     this.callbacks.onListening?.(true);
   }
@@ -166,35 +192,46 @@ export class FridaySockets {
     this.silentOutput = null;
     this.mediaStream?.getTracks().forEach((track) => track.stop());
     this.mediaStream = null;
-    if (this.audioContext && this.audioContext.state !== "closed") {
-      void this.audioContext.close();
+    if (this.micAudioContext && this.micAudioContext.state !== "closed") {
+      void this.micAudioContext.close();
     }
-    this.audioContext = null;
+    this.micAudioContext = null;
   }
 
   sendText(text) {
     if (this.live?.readyState !== WebSocket.OPEN) throw new Error("Live voice is not connected.");
+    this.ensurePlaybackContext();
     this.live.send(JSON.stringify({ type: "text", text }));
   }
 
   playPcm(buffer) {
-    if (!this.audioContext || this.audioContext.state === "closed") {
-      this.audioContext = new AudioContext();
-    }
+    if (!buffer || buffer.byteLength === 0) return;
+    const ctx = this.ensurePlaybackContext();
+
     const samples = new Int16Array(buffer);
-    const audio = this.audioContext.createBuffer(1, samples.length, 24000);
+    if (samples.length === 0) return;
+
+    const audio = ctx.createBuffer(1, samples.length, 24000);
     const channel = audio.getChannelData(0);
-    for (let i = 0; i < samples.length; i += 1) channel[i] = samples[i] / 32768;
-    const source = this.audioContext.createBufferSource();
+    for (let i = 0; i < samples.length; i += 1) {
+      channel[i] = samples[i] / 32768.0;
+    }
+
+    const source = ctx.createBufferSource();
     source.buffer = audio;
-    source.connect(this.audioContext.destination);
-    const now = this.audioContext.currentTime;
-    this.playbackAt = Math.max(now, this.playbackAt);
+    source.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (this.playbackAt < now) {
+      this.playbackAt = now + 0.04;
+    }
+
     source.start(this.playbackAt);
     this.playbackAt += audio.duration;
     this.callbacks.onSpeaking?.(true);
+
     source.onended = () => {
-      if (this.audioContext?.currentTime >= this.playbackAt - 0.03) {
+      if (this.playbackContext && this.playbackContext.currentTime >= this.playbackAt - 0.05) {
         this.callbacks.onSpeaking?.(false);
       }
     };
@@ -202,6 +239,10 @@ export class FridaySockets {
 
   close() {
     this.stopMicrophone();
+    if (this.playbackContext && this.playbackContext.state !== "closed") {
+      void this.playbackContext.close();
+    }
+    this.playbackContext = null;
     this.live?.close();
     this.telemetry?.close();
     this.callbacks.onLiveState?.("disconnected");

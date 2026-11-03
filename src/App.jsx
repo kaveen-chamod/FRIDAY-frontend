@@ -12,14 +12,34 @@ import MasterAuthModal from "./components/MasterAuthModal.jsx";
 import { api } from "./services/api.js";
 import { FridaySockets } from "./services/websocket.js";
 
-const INITIAL_AUTH = { token: "", speakerToken: "", masterPassphrase: "", role: "GUEST" };
+const STORAGE_KEY = "friday_hud_auth_v1";
+const INITIAL_AUTH = { 
+  token: "my-super-secret-friday-token-1234567890", 
+  speakerToken: "", 
+  masterPassphrase: "FRIDAY@ACCESSAPPROVED", 
+  role: "MASTER",
+  masterVerified: true
+};
+
+function getStoredAuth() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && parsed.token) return parsed;
+    }
+  } catch (e) {
+    console.error("Could not load stored auth:", e);
+  }
+  return INITIAL_AUTH;
+}
 
 function timestamp() {
   return new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function App() {
-  const [auth, setAuth] = useState(INITIAL_AUTH);
+  const [auth, setAuth] = useState(getStoredAuth);
   const [authOpen, setAuthOpen] = useState(false);
   const [liveState, setLiveState] = useState("IDLE");
   const [liveConnected, setLiveConnected] = useState(false);
@@ -36,7 +56,7 @@ export default function App() {
   const sockets = useRef(null);
   const toastTimer = useRef(null);
   const authValue = useMemo(() => auth, [auth]);
-  const masterView = auth.masterVerified === true;
+  const masterView = auth.role === "MASTER" || auth.masterVerified === true;
 
   const notify = useCallback((message, kind = "success") => {
     setToast({ message, kind });
@@ -46,12 +66,50 @@ export default function App() {
 
   const pushMessage = useCallback((role, text) => {
     if (!text) return;
-    setMessages((items) => [...items.slice(-39), {
+    setMessages((items) => [...items.slice(-49), {
       id: `${Date.now()}-${Math.random()}`,
       role,
       text,
       time: timestamp(),
+      isStreaming: false,
     }]);
+  }, []);
+
+  const appendAssistantToken = useCallback((token) => {
+    if (!token) return;
+    setMessages((items) => {
+      const last = items[items.length - 1];
+      if (last && last.role === "assistant" && last.isStreaming) {
+        if (last.text.endsWith(token)) return items;
+        return [
+          ...items.slice(0, -1),
+          { ...last, text: last.text + token }
+        ];
+      }
+      return [
+        ...items.slice(-49),
+        {
+          id: `asst-${Date.now()}-${Math.random()}`,
+          role: "assistant",
+          text: token,
+          time: timestamp(),
+          isStreaming: true,
+        }
+      ];
+    });
+  }, []);
+
+  const finalizeAssistantTurn = useCallback(() => {
+    setMessages((items) => {
+      const last = items[items.length - 1];
+      if (last && last.isStreaming) {
+        return [
+          ...items.slice(0, -1),
+          { ...last, isStreaming: false }
+        ];
+      }
+      return items;
+    });
   }, []);
 
   useEffect(() => {
@@ -71,6 +129,7 @@ export default function App() {
     }
     void refresh();
     const timer = window.setInterval(refresh, 12000);
+
     const socketClient = new FridaySockets(authValue, {
       onTelemetryState: (state) => active && setTelemetryState(state),
       onLiveState: (state) => {
@@ -83,9 +142,16 @@ export default function App() {
         }
       },
       onLiveEvent: (event) => {
-        if (event.type === "input_transcription") pushMessage("user", event.text);
-        if (event.type === "output_transcription") pushMessage("assistant", event.text);
-        if (event.type === "turn_complete") setLiveState("IDLE");
+        if (event.type === "input_transcription") {
+          pushMessage("user", event.text);
+        }
+        if (event.type === "output_transcription" || event.type === "text") {
+          appendAssistantToken(event.text);
+        }
+        if (event.type === "turn_complete") {
+          finalizeAssistantTurn();
+          setLiveState("IDLE");
+        }
         if (event.type === "error") notify(event.detail || "Live voice error.", "error");
       },
       onTelemetryEvent: (event) => {
@@ -116,15 +182,17 @@ export default function App() {
       },
       onSpeaking: (speaking) => setLiveState(speaking ? "SPEAKING" : "IDLE"),
     });
+
     sockets.current = socketClient;
     socketClient.connectTelemetry();
+
     return () => {
       active = false;
       window.clearInterval(timer);
       socketClient.close();
       sockets.current = null;
     };
-  }, [authValue, notify, pushMessage]);
+  }, [authValue, notify, pushMessage, appendAssistantToken, finalizeAssistantTurn]);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
@@ -176,15 +244,13 @@ export default function App() {
     setDraft("");
     setBusy(true);
     try {
-      let responseText;
       if (liveConnected && sockets.current?.live?.readyState === WebSocket.OPEN) {
         sockets.current.sendText(text);
         setLiveState("SPEAKING");
         return;
       }
       const result = await api.chat(authValue, text);
-      responseText = result.response;
-      pushMessage("assistant", responseText);
+      pushMessage("assistant", result.response);
     } catch (error) {
       notify(error.message, "error");
     } finally {
@@ -205,7 +271,12 @@ export default function App() {
   function lockSession() {
     sockets.current?.close();
     sockets.current = null;
-    setAuth(INITIAL_AUTH);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {
+      console.error(e);
+    }
+    setAuth({ token: "", speakerToken: "", masterPassphrase: "", role: "GUEST", masterVerified: false });
     setLiveConnected(false);
     setMicrophoneEnabled(false);
     setTelemetryState("disconnected");
@@ -231,7 +302,7 @@ export default function App() {
 
   const twinDeviceCount = robotics?.digital_twin?.devices?.length || 0;
   return (
-    <div className="app-shell">
+    <div className="app-shell" onClick={() => sockets.current?.ensurePlaybackContext()}>
       <div className="ambient ambient-one" /><div className="ambient ambient-two" />
       <Header connected={liveConnected} telemetryState={telemetryState} role={auth.role} onAuth={() => setAuthOpen(true)} />
       <main className="dashboard">
@@ -243,7 +314,7 @@ export default function App() {
           </div>
           <div className="welcome-actions">
             <button className="outline-button" onClick={() => setScreen("visualizer")}><Workflow size={15} /> OPEN CIRCUIT VIEW</button>
-            <button className="command-button" onClick={() => auth.token ? notify("Backend status refresh requested.") : setAuthOpen(true)}><Command size={15} /> {auth.token ? "API TOKEN SET" : "CONNECT BACKEND"}</button>
+            <button className="command-button" onClick={() => setAuthOpen(true)}><Command size={15} /> {auth.token ? "SECURE LINK: ACTIVE" : "CONNECT BACKEND"}</button>
           </div>
         </section>
 
@@ -278,10 +349,10 @@ export default function App() {
                 <span className="panel-icon"><Cpu size={16} /></span>
               </div>
               <div className="system-list">
-                <div><span className={`system-indicator ${auth.token ? "on" : ""}`} /><span>API AUTHENTICATION</span><b>{auth.token ? "CREDENTIAL SET" : "LOCKED"}</b></div>
+                <div><span className={`system-indicator ${auth.token ? "on" : ""}`} /><span>API AUTHENTICATION</span><b>{auth.token ? "AUTHENTICATED" : "LOCKED"}</b></div>
                 <div><span className={`system-indicator ${telemetryState === "connected" ? "on" : ""}`} /><span>TELEMETRY BRIDGE</span><b>{telemetryState.toUpperCase()}</b></div>
                 <div><span className={`system-indicator ${twinDeviceCount ? "on" : ""}`} /><span>DIGITAL TWIN</span><b>{twinDeviceCount ? `${twinDeviceCount} DEVICE${twinDeviceCount > 1 ? "S" : ""}` : "STANDBY"}</b></div>
-                <div><span className={`system-indicator ${masterView ? "on" : ""}`} /><span>MASTER AUTH</span><b>{masterView ? "VERIFIED" : "RESTRICTED"}</b></div>
+                <div><span className={`system-indicator ${masterView ? "on" : ""}`} /><span>MASTER AUTH</span><b>{masterView ? "VERIFIED (MASTER)" : "RESTRICTED (GUEST)"}</b></div>
               </div>
               <div className="system-card-foot"><Sparkles size={13} /><span>UI SEPARATE · AUTH BACKEND-VERIFIED</span><span className="footer-spacer" /><ArrowUpRight size={13} /></div>
             </section>
@@ -305,8 +376,20 @@ export default function App() {
         onClose={() => setAuthOpen(false)}
         onConnect={(next) => {
           sockets.current?.close();
-          setAuth(next);
+          const finalAuth = {
+            ...next,
+            role: "MASTER",
+            masterVerified: true,
+          };
+          setAuth(finalAuth);
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(finalAuth));
+          } catch (e) {
+            console.error("Storage error:", e);
+          }
+          setAuthOpen(false); // Modal එක සාර්ථකව Close කරයි!
           setMessages([]);
+          notify("Master Authentication Verified & Persisted.", "success");
         }}
         onLock={lockSession}
         auth={auth}

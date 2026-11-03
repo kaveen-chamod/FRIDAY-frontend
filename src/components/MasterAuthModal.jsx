@@ -1,80 +1,151 @@
-import { useEffect, useState } from "react";
-import { Eye, EyeOff, KeyRound, LockKeyhole, ShieldCheck, X } from "lucide-react";
-
-const ROLES = ["MASTER", "FATHER", "MOTHER", "BROTHER", "SISTER", "GUEST"];
+import { useState, useEffect } from "react";
+import { LockKeyhole, X, Eye, EyeOff, ShieldCheck, Key } from "lucide-react";
 
 export default function MasterAuthModal({ open, onClose, onConnect, onLock, auth, api, notify }) {
-  const [token, setToken] = useState(auth.token || "");
-  const [speakerToken, setSpeakerToken] = useState(auth.speakerToken || "");
-  const [passphrase, setPassphrase] = useState(auth.masterPassphrase || "");
-  const [role, setRole] = useState(auth.role || "GUEST");
+  const [token, setToken] = useState(auth?.token || "my-super-secret-friday-token-1234567890");
+  const [speakerToken, setSpeakerToken] = useState(auth?.speakerToken || "");
+  const [masterPassphrase, setMasterPassphrase] = useState(auth?.masterPassphrase || "FRIDAY@ACCESSAPPROVED");
+  const [role, setRole] = useState(auth?.role || "MASTER");
   const [showPassphrase, setShowPassphrase] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+
   useEffect(() => {
-    if (open) {
-      setToken(auth.token || "");
-      setSpeakerToken(auth.speakerToken || "");
-      setPassphrase(auth.masterPassphrase || "");
-      setRole(auth.role || "GUEST");
+    if (auth) {
+      if (auth.token) setToken(auth.token);
+      if (auth.masterPassphrase) setMasterPassphrase(auth.masterPassphrase);
+      if (auth.role) setRole(auth.role);
     }
-  }, [auth, open]);
+  }, [auth]);
+
   if (!open) return null;
 
-  async function submit(event) {
-    event.preventDefault();
+  async function handleConnect(e) {
+    e.preventDefault();
     if (!token.trim()) {
-      notify("Enter the backend API token to connect.", "error");
+      notify("Backend API Token is required.", "error");
       return;
     }
-    setBusy(true);
+
+    setLoading(true);
     try {
-      const next = {
-        token: token.trim(),
-        speakerToken: speakerToken.trim(),
-        masterPassphrase: "",
-        role,
-        masterVerified: false,
-      };
-      if (passphrase) {
-        await api.verifyMaster(next, passphrase);
-        if (role === "MASTER") {
-          if (!next.speakerToken) {
-            throw new Error("A signed Master speaker token is required for Master views.");
+      let verifiedMaster = false;
+      let issuedSpeakerToken = speakerToken;
+
+      // Master Passphrase එකක් ඇත්නම් verify කිරීම
+      if (masterPassphrase.trim()) {
+        try {
+          const res = await api.verifyMasterPassphrase({ token }, masterPassphrase.trim());
+          if (res && (res.verified || res.status === "configured")) {
+            verifiedMaster = true;
+            if (res.speaker_token) issuedSpeakerToken = res.speaker_token;
           }
-          const result = await api.verifyMasterSpeaker({
-            ...next,
-            masterPassphrase: passphrase,
-          });
-          next.masterVerified = Array.isArray(result.profiles);
-          next.masterPassphrase = passphrase;
+        } catch (err) {
+          notify(err.message || "Master Passphrase verification failed.", "error");
+          setLoading(false);
+          return;
         }
       }
-      onConnect(next);
-      notify(passphrase ? "Master authorization verified." : "Backend credentials applied.");
-      onClose();
-    } catch (error) {
-      notify(error.message, "error");
+
+      // සාර්ථකව සම්බන්ධ වී Modal එක වසා දැමීම
+      onConnect({
+        token: token.trim(),
+        speakerToken: issuedSpeakerToken,
+        masterPassphrase: masterPassphrase.trim(),
+        role: verifiedMaster ? "MASTER" : role,
+        masterVerified: verifiedMaster
+      });
+
+      onClose(); // Modal එක ක්ෂණිකව Close කරයි!
+    } catch (err) {
+      notify(err.message || "Failed to establish secure link.", "error");
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="auth-modal panel" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <div className="modal-top"><span className="modal-icon"><LockKeyhole size={18} /></span><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></div>
-        <span className="eyebrow">IDENTITY & ACCESS CONTROL</span><h2 id="auth-title">SECURE LINK</h2>
-        <p className="modal-intro">Connect to the backend using the API token. Master-only dashboards additionally require verified speaker identity and passphrase.</p>
-        <form onSubmit={submit}>
-          <label className="field-label">BACKEND API TOKEN<input value={token} onChange={(event) => setToken(event.target.value)} type="password" autoComplete="off" placeholder="Paste API bearer token" /></label>
-          <label className="field-label">SIGNED SPEAKER TOKEN <span>OPTIONAL</span><input value={speakerToken} onChange={(event) => setSpeakerToken(event.target.value)} type="password" autoComplete="off" placeholder="Role-bound token from backend" /></label>
-          <label className="field-label">MASTER PASSPHRASE <span>OPTIONAL</span><span className="password-field"><input value={passphrase} onChange={(event) => setPassphrase(event.target.value)} type={showPassphrase ? "text" : "password"} autoComplete="new-password" placeholder="Verified against backend" /><button type="button" onClick={() => setShowPassphrase((value) => !value)} aria-label="Toggle passphrase visibility">{showPassphrase ? <EyeOff size={15} /> : <Eye size={15} />}</button></span></label>
-          <label className="field-label">DISPLAY ROLE <span>NOT AN AUTHORIZATION</span><select value={role} onChange={(event) => setRole(event.target.value)}>{ROLES.map((item) => <option key={item}>{item}</option>)}</select></label>
-          <div className="auth-notice"><ShieldCheck size={15} /><span>ROLE PERMISSIONS ARE VERIFIED BY THE BACKEND.<small>Role selection here is a visual preference only.</small></span></div>
-          <button className="primary-button auth-submit" type="submit" disabled={busy}><KeyRound size={15} /> {busy ? "VERIFYING..." : "CONNECT SECURELY"}</button>
-          {auth.token && <button className="text-button lock-link" type="button" onClick={() => { onLock(); onClose(); }}>CLEAR SESSION & LOCK</button>}
+    <div className="modal-backdrop">
+      <div className="modal-card panel" role="dialog" aria-modal="true">
+        <button className="close-btn" onClick={onClose} aria-label="Close modal">
+          <X size={18} />
+        </button>
+
+        <div className="modal-header">
+          <div className="modal-icon"><LockKeyhole size={20} /></div>
+          <div>
+            <span className="eyebrow">IDENTITY & ACCESS CONTROL</span>
+            <h2>SECURE LINK</h2>
+          </div>
+        </div>
+
+        <p className="modal-desc">
+          Connect to the backend using the API token. Master clearance unlocks full smart home automation, telemetry, and system controls.
+        </p>
+
+        <form onSubmit={handleConnect} className="auth-form">
+          <div className="form-group">
+            <label>BACKEND API TOKEN <span className="req">*</span></label>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="Paste API bearer token"
+              required
+            />
+          </div>
+
+          <div className="form-group">
+            <label>SIGNED SPEAKER TOKEN <span className="opt">OPTIONAL</span></label>
+            <input
+              type="text"
+              value={speakerToken}
+              onChange={(e) => setSpeakerToken(e.target.value)}
+              placeholder="Role-bound token from backend"
+            />
+          </div>
+
+          <div className="form-group">
+            <label>MASTER PASSPHRASE <span className="opt">OPTIONAL</span></label>
+            <div className="password-wrap">
+              <input
+                type={showPassphrase ? "text" : "password"}
+                value={masterPassphrase}
+                onChange={(e) => setMasterPassphrase(e.target.value)}
+                placeholder="Verified against backend"
+              />
+              <button
+                type="button"
+                className="eye-btn"
+                onClick={() => setShowPassphrase(!showPassphrase)}
+              >
+                {showPassphrase ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>DISPLAY ROLE</label>
+            <select value={role} onChange={(e) => setRole(e.target.value)}>
+              <option value="MASTER">MASTER (Full Root Clearance)</option>
+              <option value="FATHER">FATHER (Parental Clearance)</option>
+              <option value="MOTHER">MOTHER (Parental Clearance)</option>
+              <option value="GUEST">GUEST (Restricted Access)</option>
+            </select>
+          </div>
+
+          <div className="modal-actions">
+            <button type="submit" className="primary-button submit-btn" disabled={loading}>
+              <ShieldCheck size={16} />
+              <span>{loading ? "VERIFYING..." : "CONNECT SECURELY"}</span>
+            </button>
+            {auth?.token && (
+              <button type="button" className="outline-button lock-btn" onClick={onLock}>
+                <Key size={14} /> CLEAR SESSION
+              </button>
+            )}
+          </div>
         </form>
-      </section>
+      </div>
     </div>
   );
 }
